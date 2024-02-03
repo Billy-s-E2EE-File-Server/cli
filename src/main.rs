@@ -4,10 +4,13 @@ use anyhow::Context;
 use auth::{login, signup};
 use bfsp::ipc;
 use bfsp::Message;
+use bfsp::PrependLen;
 use bfsp::{config::write_to_config, crypto::EncryptionKey};
 use clap::{command, Parser};
+use futures::AsyncReadExt;
 use futures::AsyncWriteExt;
 use interprocess::local_socket::{tokio::LocalSocketStream, NameTypeSupport};
+use path_absolutize::Absolutize;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::fs;
@@ -25,6 +28,7 @@ enum Command {
     Login { email: String, password: String },
     Signup { email: String, password: String },
     AddDirectory { path: PathBuf },
+    ListDirectory { path: PathBuf },
 }
 
 #[tokio::main]
@@ -75,12 +79,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match command {
-        Command::Login { email, password } => (),
-        Command::Signup { email, password } => (),
+        Command::Login {
+            email: _,
+            password: _,
+        }
+        | Command::Signup {
+            email: _,
+            password: _,
+        } => (),
         Command::AddDirectory { path } => {
-            let path = fs::canonicalize(path)
-                .await
-                .with_context(|| "error while trying to get absolute form of {path}")?;
+            let path = path.absolutize().unwrap();
 
             let msg = ipc::IpcMessage {
                 message: Some(ipc::ipc_message::Message::AddDirectory(
@@ -92,9 +100,45 @@ async fn main() -> anyhow::Result<()> {
 
             let mut ipc_stream = LocalSocketStream::connect(interprocess_path).await?;
             ipc_stream
-                .write_all(&msg.encode_to_vec())
+                .write_all(&msg.encode_to_vec().prepend_len())
                 .await
                 .with_context(|| "error sending AddDirectory message to bfsd")?;
+        }
+        Command::ListDirectory { path } => {
+            let path = path.absolutize().unwrap();
+
+            let msg = ipc::IpcMessage {
+                message: Some(ipc::ipc_message::Message::ListDirectory(
+                    ipc::ipc_message::ListDirectory {
+                        directory: path.to_str().unwrap().to_string(),
+                    },
+                )),
+            };
+
+            let mut ipc_stream = LocalSocketStream::connect(interprocess_path).await?;
+            ipc_stream
+                .write_all(&msg.encode_to_vec().prepend_len())
+                .await
+                .with_context(|| "error sending ListDirectory message to bfsd")?;
+
+            let mut len = [0u8; 4];
+            ipc_stream
+                .read_exact(&mut len)
+                .await
+                .with_context(|| "error reading bfsd message len")?;
+            let len: u32 = u32::from_le_bytes(len);
+
+            let mut buf = vec![0; len as usize];
+            ipc_stream
+                .read_exact(&mut buf)
+                .await
+                .with_context(|| "error reading from bfsd")?;
+
+            let listing = ipc::DirectoryListing::decode(buf.as_slice())
+                .with_context(|| "error decoding ListDirectoryResponse")?;
+            for entry in listing.file.iter() {
+                println!("{}", entry.path);
+            }
         }
     }
 
