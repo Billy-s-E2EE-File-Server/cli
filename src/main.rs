@@ -29,6 +29,7 @@ enum Command {
     Signup { email: String, password: String },
     AddDirectory { path: PathBuf },
     ListDirectory { path: PathBuf },
+    RemoveDirectory { path: PathBuf },
 }
 
 #[tokio::main]
@@ -139,6 +140,25 @@ async fn main() -> anyhow::Result<()> {
             for entry in listing.file.iter() {
                 println!("{}", entry.path);
             }
+        }
+        Command::RemoveDirectory { path } => {
+            let path = path.absolutize().unwrap();
+
+            let msg = ipc::IpcMessage {
+                message: Some(ipc::ipc_message::Message::RemoveDirectory(
+                    ipc::ipc_message::RemoveDirectory {
+                        directory: path.to_str().unwrap().to_string(),
+                    },
+                )),
+            };
+
+            let mut ipc_stream = LocalSocketStream::connect(interprocess_path).await?;
+            ipc_stream
+                .write_all(&msg.encode_to_vec().prepend_len())
+                .await
+                .with_context(|| "error sending ListDirectory message to bfsd")?;
+
+
         }
     }
 
